@@ -5,6 +5,8 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const { MongoClient, ServerApiVersion } = require('mongodb');
 const port = 5000;
+const nodemailer = require('nodemailer');
+const sgTransport = require('nodemailer-sendgrid-transport');
 
 app.use(cors());
 app.use(express.json());
@@ -30,6 +32,44 @@ function verifyJWT(req, res, next) {
     });
 }
 
+
+// nodemailer sendgrid
+const emailSenderOptions = {
+    auth: {
+        api_key: process.env.EMAIL_SENDER_KEY
+    }
+}
+const mailer = nodemailer.createTransport(sgTransport(emailSenderOptions));
+
+function sendAppointmentEmail(booking) {
+    const { patientEmail, patientName, date, slot, treatment } = booking; 
+
+    var email = {
+        from: process.env.SENDER_EMAIL,
+        to: patientEmail || process.env.SENDER_EMAIL, 
+        subject: `your appointment for ${treatment} is on ${date} at ${slot}`,
+        text: `your appointment for ${treatment} is on ${date} at ${slot}`,
+        html: `
+        <div>
+            <p>Hello ${patientName}</p>
+            <h3>your appointment for ${treatment} is confirmed</h3>
+            <p>looking forward to seeing you on ${date} at ${slot}</p>
+
+            <h3>our address</h3>
+            <p>andor killa bandorban</p>
+        </div>
+        `
+    };
+
+    mailer.sendMail(email, function (err, res) {
+        if (err) {
+            console.log(err)
+        }
+        console.log(res);
+    });
+}
+
+
 async function run() {
     try {
         await client.connect();
@@ -37,10 +77,24 @@ async function run() {
         const serviceCollection = client.db('Drs_Care').collection('services');
         const bookingCollection = client.db('Drs_Care').collection('bookings');
         const userCollection = client.db('Drs_Care').collection('users');
+        const doctorCollection = client.db('Drs_Care').collection('doctors');
+
+
+        const verifyAdmin = async (req, res, next) => {
+            const requester = req.decoded.email;
+            const requesterAccount = await userCollection.findOne({ email: requester });
+            if (requesterAccount.role === 'admin') {
+                next();
+            }
+            else {
+                return res.status(403).send({ message: 'forbidden access' });
+            }
+        }
+
 
         app.get('/service', async (req, res) => {
             const query = {};
-            const cursor = serviceCollection.find(query);
+            const cursor = serviceCollection.find(query).project({ name: 1 });
             const result = await cursor.toArray();
             res.send(result);
         })
@@ -87,27 +141,19 @@ async function run() {
 
         app.get('/admin/:email', async (req, res) => {
             const email = req.params.email;
-            const user = await userCollection.findOne({email});
+            const user = await userCollection.findOne({ email });
             const isAdmin = user.role === 'admin';
-            res.send({admin: isAdmin});
+            res.send({ admin: isAdmin });
         })
 
-        app.put('/user/admin/:email', verifyJWT, async (req, res) => {
+        app.put('/user/admin/:email', verifyJWT, verifyAdmin, async (req, res) => {
             const email = req.params.email;
-            const requester = req.decoded.email;
-            const requesterAccount = await userCollection.findOne({ email: requester });
-            if (requesterAccount.role === 'admin') {
-                const filter = { email: email };
-                const updateDoc = {
-                    $set: { role: 'admin' }
-                };
-                const result = await userCollection.updateOne(filter, updateDoc); 
-                return res.send({ result });
-            }
-            else{
-                return res.status(403).send({ message: 'forbidden access' });
-            }
-
+            const filter = { email: email };
+            const updateDoc = {
+                $set: { role: 'admin' }
+            };
+            const result = await userCollection.updateOne(filter, updateDoc);
+            return res.send({ result });
         })
 
         app.put('/user/:email', async (req, res) => {
@@ -131,8 +177,28 @@ async function run() {
             if (exist) {
                 return res.send({ success: false, booking: exist })
             }
-            const result = await bookingCollection.insertOne(booking);
+            const result = await bookingCollection.insertOne(booking); 
+            sendAppointmentEmail(booking);
             return res.send({ success: true, result });
+        })
+
+
+        app.get('/doctor', verifyJWT, verifyAdmin, async (req, res) => {
+            const doctor = await doctorCollection.find().toArray();
+            res.send(doctor);
+        })
+
+        app.post('/doctor', verifyJWT, verifyAdmin, async (req, res) => {
+            const doctor = req.body;
+            const result = await doctorCollection.insertOne(doctor);
+            res.send(result);
+        })
+
+        app.delete('/doctor/:email', verifyJWT, verifyAdmin, async (req, res) => {
+            const email = req.params.email; 
+            const filter = { email: email }
+            const result = await doctorCollection.deleteOne(filter);
+            res.send(result);
         })
     }
     finally {
