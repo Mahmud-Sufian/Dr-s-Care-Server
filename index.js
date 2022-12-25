@@ -3,10 +3,11 @@ const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const port = 5000;
 const nodemailer = require('nodemailer');
 const sgTransport = require('nodemailer-sendgrid-transport');
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 app.use(cors());
 app.use(express.json());
@@ -42,11 +43,11 @@ const emailSenderOptions = {
 const mailer = nodemailer.createTransport(sgTransport(emailSenderOptions));
 
 function sendAppointmentEmail(booking) {
-    const { patientEmail, patientName, date, slot, treatment } = booking; 
+    const { patientEmail, patientName, date, slot, treatment } = booking;
 
     var email = {
         from: process.env.SENDER_EMAIL,
-        to: patientEmail || process.env.SENDER_EMAIL, 
+        to: patientEmail || process.env.SENDER_EMAIL,
         subject: `your appointment for ${treatment} is on ${date} at ${slot}`,
         text: `your appointment for ${treatment} is on ${date} at ${slot}`,
         html: `
@@ -78,6 +79,7 @@ async function run() {
         const bookingCollection = client.db('Drs_Care').collection('bookings');
         const userCollection = client.db('Drs_Care').collection('users');
         const doctorCollection = client.db('Drs_Care').collection('doctors');
+        const paymentCollection = client.db('Drs_Care').collection('payments');
 
 
         const verifyAdmin = async (req, res, next) => {
@@ -90,6 +92,23 @@ async function run() {
                 return res.status(403).send({ message: 'forbidden access' });
             }
         }
+
+        app.post('/create-payment-intent', async (req, res) => {
+            const booking = req.body;
+            const price = booking.price;
+            const amount = price * 100;
+
+            const paymentIntent = await stripe.paymentIntents.create({
+                currency: 'usd',
+                amount: amount,
+                "payment_method_types": [
+                    "card"
+                ]
+            });
+            res.send({
+                clientSecret: paymentIntent.client_secret,
+            });
+        });
 
 
         app.get('/service', async (req, res) => {
@@ -131,6 +150,30 @@ async function run() {
                 return res.status(403).send({ message: 'forbidden access' });
             }
 
+        })
+
+        app.get('/booking/:id', verifyJWT, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: ObjectId(id) }
+            const result = await bookingCollection.findOne(query);
+            res.send(result);
+        })
+
+
+        app.patch('/booking/:id', verifyJWT, async(req, res) => {
+            const id = req.params.id;
+            const payment = req.body;
+            const filter = {_id: ObjectId(id)};
+            const updateDoc = {
+                $set: {
+                    paid: true,
+                    transactionId: payment.transactionId,
+                }
+            }
+
+            const updatedBooking = await bookingCollection.updateOne(filter, updateDoc);
+            const result = await paymentCollection.insertOne(payment);
+            res.send(updatedBooking);
         })
 
 
@@ -177,7 +220,7 @@ async function run() {
             if (exist) {
                 return res.send({ success: false, booking: exist })
             }
-            const result = await bookingCollection.insertOne(booking); 
+            const result = await bookingCollection.insertOne(booking);
             sendAppointmentEmail(booking);
             return res.send({ success: true, result });
         })
@@ -195,7 +238,7 @@ async function run() {
         })
 
         app.delete('/doctor/:email', verifyJWT, verifyAdmin, async (req, res) => {
-            const email = req.params.email; 
+            const email = req.params.email;
             const filter = { email: email }
             const result = await doctorCollection.deleteOne(filter);
             res.send(result);
